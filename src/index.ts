@@ -1,0 +1,374 @@
+import { Worker } from 'worker_threads';
+import { Tokenizer } from './tokenizer';
+import type { BM25Options, SearchResult, FieldBoosts, Document } from './types';
+import { DEFAULT_OPTIONS } from './constants';
+
+/**
+ * Implementation of the Okapi BM25 ranking algorithm with field boosting support
+ */
+export class BM25 {
+  private readonly termFrequencySaturation: number;
+  private readonly lengthNormalizationFactor: number;
+  private readonly tokenizer: Tokenizer;
+  private documentLengths: Uint32Array;
+  private averageDocLength: number;
+  private readonly termToIndex: Map<string, number>;
+  private documentFrequency: Uint32Array;
+  private readonly termFrequencies: Map<number, Map<number, number>>;
+  private readonly fieldBoosts: FieldBoosts;
+  private documents: Document[];
+
+  /**
+   * Creates a new BM25 search instance
+   * @param docs - Array of documents to index
+   * @param options - BM25 algorithm options and field boost settings
+   */
+  constructor(
+    docs: Document[],
+    options: BM25Options & { fieldBoosts?: FieldBoosts } = {},
+  ) {
+    if (!docs || docs.length === 0) {
+      throw new Error('Document set cannot be empty');
+    }
+
+    this.documents = [...docs];
+    const opts = { ...DEFAULT_OPTIONS, ...options };
+    this.termFrequencySaturation = opts.k1;
+    this.lengthNormalizationFactor = opts.b;
+    this.tokenizer = new Tokenizer(opts);
+    this.fieldBoosts = opts.fieldBoosts || {};
+
+    const {
+      documentLengths,
+      termToIndex,
+      documentFrequency,
+      averageDocLength,
+      termFrequencies,
+    } = this.processDocuments(docs);
+
+    this.documentLengths = documentLengths;
+    this.termToIndex = termToIndex;
+    this.documentFrequency = documentFrequency;
+    this.averageDocLength = averageDocLength;
+    this.termFrequencies = termFrequencies;
+  }
+
+  private processDocuments(docs: Document[]): {
+    documentLengths: Uint32Array;
+    termToIndex: Map<string, number>;
+    documentFrequency: Uint32Array;
+    averageDocLength: number;
+    termFrequencies: Map<number, Map<number, number>>;
+  } {
+    const documentLengths = new Uint32Array(docs.length);
+    const termToIndex = new Map<string, number>();
+    const termDocs = new Map<string, Set<number>>();
+    const termFrequencies = new Map<number, Map<number, number>>();
+    let totalLength = 0;
+    let nextTermIndex = 0;
+
+    docs.forEach((doc, docIndex) => {
+      let docLength = 0;
+      Object.entries(doc).forEach(([field, content]) => {
+        const { tokens } = this.tokenizer.tokenize(content);
+        docLength += tokens.length * (this.fieldBoosts[field] || 1);
+
+        const uniqueTerms = new Set(tokens);
+        uniqueTerms.forEach((term) => {
+          if (!termToIndex.has(term)) {
+            termToIndex.set(term, nextTermIndex++);
+          }
+          const termIndex = termToIndex.get(term)!;
+
+          if (!termDocs.has(term)) {
+            termDocs.set(term, new Set());
+          }
+          termDocs.get(term)!.add(docIndex);
+
+          if (!termFrequencies.has(termIndex)) {
+            termFrequencies.set(termIndex, new Map());
+          }
+          const freq = tokens.filter((t) => t === term).length;
+          termFrequencies.get(termIndex)!.set(docIndex, freq);
+        });
+      });
+
+      documentLengths[docIndex] = docLength;
+      totalLength += docLength;
+    });
+
+    const documentFrequency = new Uint32Array(termToIndex.size);
+    termDocs.forEach((docs, term) => {
+      const termIndex = termToIndex.get(term)!;
+      documentFrequency[termIndex] = docs.size;
+    });
+
+    return {
+      documentLengths,
+      termToIndex,
+      documentFrequency,
+      averageDocLength: totalLength / docs.length,
+      termFrequencies,
+    };
+  }
+
+  /**
+   * Adds multiple documents to the index using parallel processing
+   * @param docs - Array of documents to add
+   */
+  public async addDocumentsParallel(docs: Document[]): Promise<void> {
+    if (!docs || docs.length === 0) return;
+
+    const numWorkers = 4; // Adjust based on available CPU cores
+    const batchSize = Math.ceil(docs.length / numWorkers);
+    const workers: Worker[] = [];
+
+    try {
+      for (let i = 0; i < numWorkers; i++) {
+        const start = i * batchSize;
+        const end = start + batchSize;
+        const worker = new Worker('./worker.js');
+        worker.postMessage({
+          docs: docs.slice(start, end),
+          options: { ...DEFAULT_OPTIONS, fieldBoosts: this.fieldBoosts },
+        });
+        workers.push(worker);
+      }
+
+      const results = await Promise.all(
+        workers.map(
+          (worker) =>
+            new Promise<ReturnType<typeof this.processDocuments>>(
+              (resolve, reject) => {
+                worker.on('message', resolve);
+                worker.on('error', reject);
+              },
+            ),
+        ),
+      );
+
+      // Store new documents
+      const startIndex = this.documents.length;
+      this.documents.push(...docs);
+
+      // Merge results from all workers
+      results.forEach((result) => {
+        // Merge document lengths
+        for (let i = 0; i < result.documentLengths.length; i++) {
+          this.documentLengths[this.documentLengths.length + i] =
+            result.documentLengths[i];
+        }
+
+        // Merge term to index mapping
+        result.termToIndex.forEach((index, term) => {
+          if (!this.termToIndex.has(term)) {
+            this.termToIndex.set(term, this.termToIndex.size);
+          }
+        });
+
+        // Merge document frequency
+        for (let i = 0; i < result.documentFrequency.length; i++) {
+          this.documentFrequency[i] += result.documentFrequency[i];
+        }
+
+        // Merge term frequencies
+        result.termFrequencies.forEach((docFreqs, termIndex) => {
+          if (!this.termFrequencies.has(termIndex)) {
+            this.termFrequencies.set(termIndex, new Map());
+          }
+          docFreqs.forEach((freq, docIndex) => {
+            this.termFrequencies
+              .get(termIndex)!
+              .set(docIndex + this.documentLengths.length, freq);
+          });
+        });
+      });
+
+      // Recalculate average document length
+      const totalLength = this.documentLengths.reduce(
+        (sum, length) => sum + length,
+        0,
+      );
+      this.averageDocLength = totalLength / this.documentLengths.length;
+    } finally {
+      // Ensure workers are terminated
+      workers.forEach((worker) => worker.terminate());
+    }
+  }
+
+  /**
+   * Searches the indexed documents using BM25 ranking
+   * @param query - Search query text
+   * @param limit - Maximum number of results to return
+   * @returns Array of search results sorted by relevance score
+   */
+  public search(query: string, topK: number = 10): SearchResult[] {
+    const { tokens: queryTokens } = this.tokenizer.tokenize(query);
+    const scores = new Float32Array(this.documentLengths.length);
+
+    queryTokens.forEach((term) => {
+      const termIndex = this.termToIndex.get(term);
+      if (termIndex === undefined) return;
+
+      const idf = this.calculateIDF(termIndex);
+      const termFreqs = this.termFrequencies.get(termIndex)!;
+
+      termFreqs.forEach((tf, docIndex) => {
+        const docLength = this.documentLengths[docIndex];
+        const normalizedTF =
+          (tf * (this.termFrequencySaturation + 1)) /
+          (tf +
+            this.termFrequencySaturation *
+              (1 -
+                this.lengthNormalizationFactor +
+                (this.lengthNormalizationFactor * docLength) /
+                  this.averageDocLength));
+        scores[docIndex] += idf * normalizedTF;
+      });
+    });
+
+    return Array.from({ length: scores.length }, (_, i) => ({
+      index: i,
+      score: scores[i],
+    }))
+      .filter((result) => result.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, topK);
+  }
+
+  public searchPhrase(phrase: string, topK: number = 10): SearchResult[] {
+    const { tokens: phraseTokens } = this.tokenizer.tokenize(phrase);
+    const candidateDocs = new Set<number>();
+
+    // Find documents containing all terms in the phrase
+    phraseTokens.forEach((term) => {
+      const termIndex = this.termToIndex.get(term);
+      if (termIndex !== undefined) {
+        const docs = this.termFrequencies.get(termIndex)!.keys();
+        if (candidateDocs.size === 0) {
+          for (const doc of docs) {
+            candidateDocs.add(doc);
+          }
+        } else {
+          for (const doc of candidateDocs) {
+            if (!this.termFrequencies.get(termIndex)!.has(doc)) {
+              candidateDocs.delete(doc);
+            }
+          }
+        }
+      }
+    });
+
+    // Check for exact phrase matches and calculate scores
+    const scores = new Map<number, number>();
+    candidateDocs.forEach((docIndex) => {
+      const { tokens: docTokens } = this.tokenizer.tokenize(
+        Object.values(this.getDocument(docIndex)).join(' '),
+      );
+      for (let i = 0; i <= docTokens.length - phraseTokens.length; i++) {
+        if (phraseTokens.every((token, j) => token === docTokens[i + j])) {
+          const score = this.calculatePhraseScore(phraseTokens, docIndex);
+          scores.set(docIndex, score);
+          break;
+        }
+      }
+    });
+
+    return Array.from(scores.entries())
+      .map(([index, score]) => ({ index, score }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, topK);
+  }
+
+  private calculatePhraseScore(
+    phraseTokens: string[],
+    docIndex: number,
+  ): number {
+    return phraseTokens.reduce((score, term) => {
+      const termIndex = this.termToIndex.get(term);
+      if (termIndex === undefined) return score;
+
+      const idf = this.calculateIDF(termIndex);
+      const tf = this.termFrequencies.get(termIndex)!.get(docIndex) || 0;
+      const docLength = this.documentLengths[docIndex];
+      const normalizedTF =
+        (tf * (this.termFrequencySaturation + 1)) /
+        (tf +
+          this.termFrequencySaturation *
+            (1 -
+              this.lengthNormalizationFactor +
+              (this.lengthNormalizationFactor * docLength) /
+                this.averageDocLength));
+      return score + idf * normalizedTF;
+    }, 0);
+  }
+
+  /**
+   * Adds a new document to the index
+   * @param doc - Document to add
+   */
+  public addDocument(doc: Document): void {
+    if (!doc) throw new Error('Document cannot be null');
+
+    const docIndex = this.documentLengths.length;
+    this.documents.push(doc);
+
+    let docLength = 0;
+
+    Object.entries(doc).forEach(([field, content]) => {
+      const { tokens } = this.tokenizer.tokenize(content);
+      docLength += tokens.length * (this.fieldBoosts[field] || 1);
+
+      const uniqueTerms = new Set(tokens);
+      uniqueTerms.forEach((term) => {
+        if (!this.termToIndex.has(term)) {
+          this.termToIndex.set(term, this.termToIndex.size);
+        }
+        const termIndex = this.termToIndex.get(term)!;
+
+        if (this.documentFrequency.length <= termIndex) {
+          const newDocFreq = new Uint32Array(this.documentFrequency.length * 2);
+          newDocFreq.set(this.documentFrequency);
+          this.documentFrequency = newDocFreq;
+        }
+        this.documentFrequency[termIndex]++;
+
+        if (!this.termFrequencies.has(termIndex)) {
+          this.termFrequencies.set(termIndex, new Map());
+        }
+        const freq = tokens.filter((t) => t === term).length;
+        this.termFrequencies.get(termIndex)!.set(docIndex, freq);
+      });
+    });
+
+    const newDocLengths = new Uint32Array(this.documentLengths.length + 1);
+    newDocLengths.set(this.documentLengths);
+    newDocLengths[docIndex] = docLength;
+    this.documentLengths = newDocLengths;
+
+    const totalLength = this.documentLengths.reduce(
+      (sum, length) => sum + length,
+      0,
+    );
+    this.averageDocLength = totalLength / this.documentLengths.length;
+  }
+
+  private calculateIDF(termIndex: number): number {
+    const docFreq = this.documentFrequency[termIndex];
+    if (docFreq === 0) return 0;
+
+    const N = this.documentLengths.length;
+    return Math.log((N - docFreq + 0.5) / (docFreq + 0.5) + 1);
+  }
+
+  private getTermFrequency(termIndex: number, docIndex: number): number {
+    return this.termFrequencies.get(termIndex)?.get(docIndex) || 0;
+  }
+
+  private getDocument(index: number): Document {
+    if (index < 0 || index >= this.documents.length) {
+      throw new Error('Document index out of bounds');
+    }
+    return this.documents[index];
+  }
+}
