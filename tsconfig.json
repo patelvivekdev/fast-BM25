@@ -25,5 +25,7 @@
     "noPropertyAccessFromIndexSignature": false,
 
     "types": ["@types/node", "vitest/globals"]
-  }
+  },
+  "include": ["."],
+  "exclude": ["dist", "build", "node_modules"]
 }
