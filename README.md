@@ -54,6 +54,29 @@ console.log(results);
 // ]
 ```
 
+### Adding Documents
+
+```typescript
+const bm25 = new BM25();
+
+// Add documents
+bm25.addDocument({ title: 'Document title', content: 'Document content' });
+
+// Add multiple documents
+bm25.addDocuments([
+  { title: 'Document 1', content: 'Content 1' },
+  { title: 'Document 2', content: 'Content 2' },
+]);
+
+// Add documents in parallel
+
+const largeDocs = [
+  /* ... lots of documents ... */
+];
+
+await bm25.addDocumentsParallel(largeDocs);
+```
+
 ### Field Boosting
 
 ```typescript
@@ -76,19 +99,4 @@ const customBM25 = new BM25(docs, {
   stopWords: new Set(['the', 'a', 'is']), // Custom stop words
   stemming: true, // Enable word stemming
 });
-```
-
-### Parallel Processing
-
-```typescript
-const largeDocs = [
-  /* ... lots of documents ... */
-];
-const bm25 = new BM25();
-
-// Add documents in parallel
-await bm25.addDocumentsParallel(largeDocs);
-
-// Search as normal
-const results = bm25.search('query terms');
 ```

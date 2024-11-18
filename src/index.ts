@@ -1,7 +1,14 @@
 import { Worker } from 'worker_threads';
 import { Tokenizer } from './tokenizer';
-import type { BM25Options, SearchResult, FieldBoosts, Document } from './types';
+import type {
+  BM25Options,
+  SearchResult,
+  FieldBoosts,
+  Document,
+  SerializableResult,
+} from './types';
 import { DEFAULT_OPTIONS } from './constants';
+import path from 'path';
 
 /**
  * Implementation of the Okapi BM25 ranking algorithm with field boosting support
@@ -20,37 +27,44 @@ export class BM25 {
 
   /**
    * Creates a new BM25 search instance
-   * @param docs - Array of documents to index
+   * @param docs - Optional array of documents to index
    * @param options - BM25 algorithm options and field boost settings
    */
   constructor(
-    docs: Document[],
+    docs?: Document[],
     options: BM25Options & { fieldBoosts?: FieldBoosts } = {},
   ) {
-    if (!docs || docs.length === 0) {
-      throw new Error('Document set cannot be empty');
-    }
-
-    this.documents = [...docs];
     const opts = { ...DEFAULT_OPTIONS, ...options };
     this.termFrequencySaturation = opts.k1;
     this.lengthNormalizationFactor = opts.b;
     this.tokenizer = new Tokenizer(opts);
     this.fieldBoosts = opts.fieldBoosts || {};
 
-    const {
-      documentLengths,
-      termToIndex,
-      documentFrequency,
-      averageDocLength,
-      termFrequencies,
-    } = this.processDocuments(docs);
+    // Initialize empty data structures
+    this.documents = [];
+    this.documentLengths = new Uint32Array(0);
+    this.termToIndex = new Map();
+    this.documentFrequency = new Uint32Array(0);
+    this.averageDocLength = 0;
+    this.termFrequencies = new Map();
 
-    this.documentLengths = documentLengths;
-    this.termToIndex = termToIndex;
-    this.documentFrequency = documentFrequency;
-    this.averageDocLength = averageDocLength;
-    this.termFrequencies = termFrequencies;
+    // Process documents if provided
+    if (docs && docs.length > 0) {
+      this.documents = [...docs];
+      const {
+        documentLengths,
+        termToIndex,
+        documentFrequency,
+        averageDocLength,
+        termFrequencies,
+      } = this.processDocuments(docs);
+
+      this.documentLengths = documentLengths;
+      this.termToIndex = termToIndex;
+      this.documentFrequency = documentFrequency;
+      this.averageDocLength = averageDocLength;
+      this.termFrequencies = termFrequencies;
+    }
   }
 
   private processDocuments(docs: Document[]): {
@@ -70,8 +84,9 @@ export class BM25 {
     docs.forEach((doc, docIndex) => {
       let docLength = 0;
       Object.entries(doc).forEach(([field, content]) => {
+        const fieldBoost = this.fieldBoosts[field] || 1;
         const { tokens } = this.tokenizer.tokenize(content);
-        docLength += tokens.length * (this.fieldBoosts[field] || 1);
+        docLength += tokens.length * fieldBoost;
 
         const uniqueTerms = new Set(tokens);
         uniqueTerms.forEach((term) => {
@@ -88,8 +103,10 @@ export class BM25 {
           if (!termFrequencies.has(termIndex)) {
             termFrequencies.set(termIndex, new Map());
           }
-          const freq = tokens.filter((t) => t === term).length;
-          termFrequencies.get(termIndex)!.set(docIndex, freq);
+          const freq = tokens.filter((t) => t === term).length * fieldBoost; // Apply boost to term frequency
+          const existingFreq =
+            termFrequencies.get(termIndex)!.get(docIndex) || 0;
+          termFrequencies.get(termIndex)!.set(docIndex, existingFreq + freq);
         });
       });
 
@@ -119,81 +136,93 @@ export class BM25 {
   public async addDocumentsParallel(docs: Document[]): Promise<void> {
     if (!docs || docs.length === 0) return;
 
-    const numWorkers = 4; // Adjust based on available CPU cores
+    const numWorkers = Math.ceil(require('os').cpus().length / 2) || 2;
     const batchSize = Math.ceil(docs.length / numWorkers);
     const workers: Worker[] = [];
 
     try {
-      for (let i = 0; i < numWorkers; i++) {
+      const workerPromises = Array.from({ length: numWorkers }, (_, i) => {
         const start = i * batchSize;
-        const end = start + batchSize;
-        const worker = new Worker('./worker.js');
-        worker.postMessage({
-          docs: docs.slice(start, end),
-          options: { ...DEFAULT_OPTIONS, fieldBoosts: this.fieldBoosts },
-        });
+        const end = Math.min(start + batchSize, docs.length);
+        const worker = new Worker(path.resolve(__dirname, './worker.js'));
         workers.push(worker);
-      }
 
-      const results = await Promise.all(
-        workers.map(
-          (worker) =>
-            new Promise<ReturnType<typeof this.processDocuments>>(
-              (resolve, reject) => {
-                worker.on('message', resolve);
-                worker.on('error', reject);
-              },
-            ),
-        ),
+        return new Promise<SerializableResult>((resolve, reject) => {
+          worker.on('message', resolve);
+          worker.on('error', reject);
+          worker.postMessage({
+            docs: docs.slice(start, end),
+            options: { fieldBoosts: this.fieldBoosts },
+          });
+        });
+      });
+
+      const results = await Promise.all(workerPromises);
+
+      // Initialize arrays with proper size
+      const totalDocs = docs.length;
+      const newDocLengths = new Uint32Array(
+        this.documentLengths.length + totalDocs,
       );
+      newDocLengths.set(this.documentLengths);
+      this.documentLengths = newDocLengths;
 
       // Store new documents
       const startIndex = this.documents.length;
       this.documents.push(...docs);
 
-      // Merge results from all workers
+      let offset = startIndex;
       results.forEach((result) => {
-        // Merge document lengths
+        // Update document lengths
         for (let i = 0; i < result.documentLengths.length; i++) {
-          this.documentLengths[this.documentLengths.length + i] =
-            result.documentLengths[i];
+          this.documentLengths[offset + i] = result.documentLengths[i];
         }
 
-        // Merge term to index mapping
-        result.termToIndex.forEach((index, term) => {
+        // Merge term mappings and frequencies
+        result.termToIndex.forEach(([term, index]) => {
           if (!this.termToIndex.has(term)) {
             this.termToIndex.set(term, this.termToIndex.size);
           }
-        });
+          const newIndex = this.termToIndex.get(term)!;
 
-        // Merge document frequency
-        for (let i = 0; i < result.documentFrequency.length; i++) {
-          this.documentFrequency[i] += result.documentFrequency[i];
-        }
+          // Update term frequencies with correct document offset
+          const freqMap = new Map(
+            result.termFrequencies
+              .filter(([tIndex]) => tIndex === index)
+              .flatMap(([_, docFreqs]) => docFreqs)
+              .map(([docIdx, freq]) => [docIdx + offset, freq]),
+          );
 
-        // Merge term frequencies
-        result.termFrequencies.forEach((docFreqs, termIndex) => {
-          if (!this.termFrequencies.has(termIndex)) {
-            this.termFrequencies.set(termIndex, new Map());
+          if (!this.termFrequencies.has(newIndex)) {
+            this.termFrequencies.set(newIndex, freqMap);
+          } else {
+            freqMap.forEach((freq, docIdx) => {
+              this.termFrequencies.get(newIndex)!.set(docIdx, freq);
+            });
           }
-          docFreqs.forEach((freq, docIndex) => {
-            this.termFrequencies
-              .get(termIndex)!
-              .set(docIndex + this.documentLengths.length, freq);
-          });
         });
+
+        offset += result.documentCount;
       });
 
-      // Recalculate average document length
-      const totalLength = this.documentLengths.reduce(
-        (sum, length) => sum + length,
-        0,
-      );
-      this.averageDocLength = totalLength / this.documentLengths.length;
+      // Recalculate document frequency and average length
+      this.updateDocumentFrequency();
+      this.recalculateAverageLength();
     } finally {
-      // Ensure workers are terminated
       workers.forEach((worker) => worker.terminate());
     }
+  }
+
+  private updateDocumentFrequency(): void {
+    this.documentFrequency = new Uint32Array(this.termToIndex.size);
+    this.termFrequencies.forEach((docFreqs, termIndex) => {
+      this.documentFrequency[termIndex] = docFreqs.size;
+    });
+  }
+
+  private recalculateAverageLength(): void {
+    const totalLength = this.documentLengths.reduce((sum, len) => sum + len, 0);
+    this.averageDocLength = totalLength / this.documentLengths.length;
   }
 
   /**
@@ -262,16 +291,24 @@ export class BM25 {
     // Check for exact phrase matches and calculate scores
     const scores = new Map<number, number>();
     candidateDocs.forEach((docIndex) => {
-      const { tokens: docTokens } = this.tokenizer.tokenize(
-        Object.values(this.getDocument(docIndex)).join(' '),
-      );
-      for (let i = 0; i <= docTokens.length - phraseTokens.length; i++) {
-        if (phraseTokens.every((token, j) => token === docTokens[i + j])) {
-          const score = this.calculatePhraseScore(phraseTokens, docIndex);
-          scores.set(docIndex, score);
-          break;
+      const doc = this.getDocument(docIndex);
+      let hasMatch = false;
+
+      // Search through each field separately
+      Object.entries(doc).forEach(([field, content]) => {
+        const fieldBoost = this.fieldBoosts[field] || 1;
+        const { tokens: docTokens } = this.tokenizer.tokenize(content);
+
+        for (let i = 0; i <= docTokens.length - phraseTokens.length; i++) {
+          if (phraseTokens.every((token, j) => token === docTokens[i + j])) {
+            const score =
+              this.calculatePhraseScore(phraseTokens, docIndex) * fieldBoost;
+            scores.set(docIndex, (scores.get(docIndex) || 0) + score);
+            hasMatch = true;
+            break;
+          }
         }
-      }
+      });
     });
 
     return Array.from(scores.entries())
@@ -307,7 +344,7 @@ export class BM25 {
    * Adds a new document to the index
    * @param doc - Document to add
    */
-  public addDocument(doc: Document): void {
+  public async addDocument(doc: Document): Promise<void> {
     if (!doc) throw new Error('Document cannot be null');
 
     const docIndex = this.documentLengths.length;
@@ -370,5 +407,22 @@ export class BM25 {
       throw new Error('Document index out of bounds');
     }
     return this.documents[index];
+  }
+
+  public clearDocuments(): void {
+    this.documents = [];
+    this.documentLengths = new Uint32Array(0);
+    this.termToIndex.clear();
+    this.documentFrequency = new Uint32Array(0);
+    this.averageDocLength = 0;
+    this.termFrequencies.clear();
+  }
+
+  public getDocumentCount(): number {
+    return this.documents.length;
+  }
+
+  public async addDocuments(docs: Document[]): Promise<void> {
+    docs.forEach((doc) => this.addDocument(doc));
   }
 }

@@ -1,17 +1,11 @@
 import { parentPort } from 'worker_threads';
 import { Tokenizer } from './tokenizer';
-import type { BM25Options, Document, FieldBoosts } from './types';
+import type { Document, BM25Options, FieldBoosts } from './types';
 
 function processDocuments(
   docs: Document[],
   options: BM25Options & { fieldBoosts?: FieldBoosts },
-): {
-  documentLengths: Uint32Array;
-  termToIndex: Map<string, number>;
-  documentFrequency: Uint32Array;
-  averageDocLength: number;
-  termFrequencies: Map<number, Map<number, number>>;
-} {
+) {
   const tokenizer = new Tokenizer(options);
   const documentLengths = new Uint32Array(docs.length);
   const termToIndex = new Map<string, number>();
@@ -23,7 +17,7 @@ function processDocuments(
   docs.forEach((doc, docIndex) => {
     let docLength = 0;
     Object.entries(doc).forEach(([field, content]) => {
-      const tokens = tokenizer.tokenize(content);
+      const { tokens } = tokenizer.tokenize(content);
       docLength += tokens.length * (options.fieldBoosts?.[field] || 1);
 
       const uniqueTerms = new Set(tokens);
@@ -56,12 +50,20 @@ function processDocuments(
     documentFrequency[termIndex] = docs.size;
   });
 
+  // Convert Maps to serializable format
+  const serializedTermToIndex = Array.from(termToIndex.entries());
+  const serializedTermFrequencies = Array.from(termFrequencies.entries()).map(
+    ([termIndex, docFreqs]) => [termIndex, Array.from(docFreqs.entries())],
+  );
+
+  // Modify return format for better serialization
   return {
-    documentLengths,
-    termToIndex,
-    documentFrequency,
+    documentLengths: Array.from(documentLengths),
+    termToIndex: serializedTermToIndex,
+    documentFrequency: Array.from(documentFrequency),
     averageDocLength: totalLength / docs.length,
-    termFrequencies,
+    termFrequencies: serializedTermFrequencies,
+    documentCount: docs.length,
   };
 }
 

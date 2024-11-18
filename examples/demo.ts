@@ -4,7 +4,7 @@ import { BM25 } from '../src/index';
 // Sample documents for demonstration
 const docs = [
   { title: 'The quick brown fox', content: 'jumps over the lazy dog' },
-  { title: 'The lazy brown dog', content: 'sleeps all day long' },
+  { title: 'The lazy brown fox dog', content: 'sleeps all day long' },
   { title: 'Quick fox', content: 'quick brown jumping' },
 ];
 // Create a new BM25 instance
@@ -14,16 +14,22 @@ const bm25 = new BM25(docs);
 const query = 'brown fox';
 
 // Get search results
-const results = bm25.search(query, 2);
-console.log(results);
+const results = bm25.search(query, 3);
+console.log('results', results);
 
-// // Print the results
-// console.log('Search query:', query);
-// console.log('Results (document index and score):');
-// results.forEach((result) => {
-//   console.log(`Document ${result.index}: ${result.score.toFixed(4)}`);
-//   console.log(
-//     `Content: "${docs[result.index].title}: ${docs[result.index].content}"`,
-//   );
-//   console.log('---');
-// });
+const bm25_2 = new BM25();
+await bm25_2.addDocumentsParallel(docs);
+
+// Get search results
+
+const results_2 = bm25.search(query, 3);
+console.log('results_2', results_2);
+
+// Example with field boosts
+
+const bm25_3 = new BM25(docs, { fieldBoosts: { title: 100, content: 1 } });
+
+// Get search results
+const results_3 = bm25_3.search(query, 3);
+
+console.log('results_3', results_3);

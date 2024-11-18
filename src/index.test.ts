@@ -48,4 +48,29 @@ describe('BM25', () => {
       expect(results).toHaveLength(0);
     });
   });
+
+  describe('Document Management', () => {
+    it('should add documents', async () => {
+      const bm25 = new BM25();
+      await bm25.addDocument({ content: 'hello world' });
+      expect(bm25.getDocumentCount()).toBe(1);
+    });
+
+    it('should add documents', async () => {
+      const docs = [
+        { content: 'hello world' },
+        { content: 'hello test' },
+        { content: 'hello again' },
+      ];
+      const bm25 = new BM25();
+      await bm25.addDocuments(docs);
+      expect(bm25.getDocumentCount()).toBe(3);
+    });
+
+    it('should clear documents', async () => {
+      const bm25 = new BM25([{ content: 'hello world' }]);
+      bm25.clearDocuments();
+      expect(bm25.getDocumentCount()).toBe(0);
+    });
+  });
 });

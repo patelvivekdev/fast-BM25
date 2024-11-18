@@ -82,3 +82,12 @@ export interface Document {
   /** Field name to text content mapping */
   [field: string]: string;
 }
+
+export interface SerializableResult {
+  documentLengths: number[]; // Will be converted to Uint32Array
+  termToIndex: [string, number][]; // Map as array of entries
+  documentFrequency: number[]; // Will be converted to Uint32Array
+  averageDocLength: number;
+  termFrequencies: [number, [number, number][]][]; // Nested Maps as arrays of entries
+  documentCount: number;
+}

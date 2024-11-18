@@ -1,6 +1,6 @@
 {
   "name": "fast-bm25",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "High-performance BM25 implementation in TypeScript",
   "type": "module",
   "author": "Vivek Patel <me@patelvivek.dev>",
@@ -13,7 +13,6 @@
     "clean": "rm -rf dist",
     "check-exports": "attw --pack . --ignore-rules=cjs-resolves-to-esm",
     "test": "vitest --run",
-    "prepare": "npm run build",
     "lint": "eslint src/**/*.ts",
     "format": "prettier --write .",
     "check-format": "prettier --check .",
@@ -71,5 +70,8 @@
   },
   "bugs": {
     "url": "https://github.com/patelvivekdev/fast-bm25/issues"
+  },
+  "dependencies": {
+    "porter2": "^1.0.2"
   }
 }
