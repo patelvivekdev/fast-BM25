@@ -26,6 +26,6 @@
 
     "types": ["@types/node", "vitest/globals"]
   },
-  "include": ["."],
+  "include": ["src/**/*.ts", "examples/**/*.ts", "*.ts"],
   "exclude": ["dist", "build", "node_modules"]
 }
