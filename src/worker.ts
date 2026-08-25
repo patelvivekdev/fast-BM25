@@ -18,7 +18,8 @@ function processDocuments(
     let docLength = 0;
     Object.entries(doc).forEach(([field, content]) => {
       const { tokens } = tokenizer.tokenize(content);
-      docLength += tokens.length * (options.fieldBoosts?.[field] || 1);
+      const fieldBoost = options.fieldBoosts?.[field] || 1;
+      docLength += tokens.length * fieldBoost;
 
       const uniqueTerms = new Set(tokens);
       uniqueTerms.forEach((term) => {
@@ -35,8 +36,9 @@ function processDocuments(
         if (!termFrequencies.has(termIndex)) {
           termFrequencies.set(termIndex, new Map());
         }
-        const freq = tokens.filter((t) => t === term).length;
-        termFrequencies.get(termIndex)!.set(docIndex, freq);
+        const freq = tokens.filter((t) => t === term).length * fieldBoost;
+        const existingFreq = termFrequencies.get(termIndex)!.get(docIndex) || 0;
+        termFrequencies.get(termIndex)!.set(docIndex, existingFreq + freq);
       });
     });
 

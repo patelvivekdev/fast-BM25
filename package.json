@@ -1,37 +1,40 @@
 {
   "name": "fast-bm25",
-  "version": "0.0.4",
+  "version": "0.0.6",
   "description": "High-performance BM25 implementation in TypeScript",
   "type": "module",
   "author": "Vivek Patel <me@patelvivek.dev>",
   "license": "MIT",
-  "main": "./dist/index.js",
-  "module": "Preserve",
+  "packageManager": "bun@1.4.0",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "scripts": {
     "build": "tsup",
     "clean": "rm -rf dist",
-    "check-exports": "attw --pack . --ignore-rules=cjs-resolves-to-esm",
-    "test": "vitest --run",
+    "check-exports": "attw --pack .",
+    "check-types-ts7": "bunx --package typescript@7.0.2 tsc --noEmit",
+    "test": "bun run build && vitest --run",
     "lint": "eslint src/**/*.ts",
     "format": "prettier --write .",
     "check-format": "prettier --check .",
-    "ci": "bun run build && bun run check-format && bun run test",
-    "prepublishOnly": "npm run build && npm test",
-    "local-release": "changeset version && changeset publish"
+    "ci": "bun run check-format && bun run test && bun run check-types-ts7 && bun run check-exports",
+    "prepublishOnly": "bun run ci",
+    "version": "bunx changeset version",
+    "release": "bun run ci && bun publish"
   },
   "devDependencies": {
-    "@arethetypeswrong/cli": "^0.17.0",
-    "@changesets/cli": "^2.27.9",
-    "@types/bun": "^1.1.13",
-    "@types/node": "^22.9.0",
-    "prettier": "^3.3.3",
-    "tsup": "^8.3.5",
-    "vite-tsconfig-paths": "^5.1.2",
-    "vitest": "^2.1.5"
+    "@arethetypeswrong/cli": "^0.18.5",
+    "@changesets/cli": "^2.31.1",
+    "@types/bun": "^1.4.0",
+    "@types/node": "^22.20.1",
+    "prettier": "^3.9.6",
+    "tsup": "^8.5.1",
+    "vite": "^8.2.2",
+    "vitest": "^4.1.11"
   },
   "peerDependencies": {
-    "typescript": "^5.6.3"
+    "typescript": "^5.6.3 || ^6.0.0 || ^7.0.0"
   },
   "keywords": [
     "bm25",
@@ -51,9 +54,14 @@
   "exports": {
     "./package.json": "./package.json",
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "require": "./dist/index.js",
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      },
       "default": "./dist/index.cjs"
     }
   },
@@ -72,6 +80,9 @@
     "url": "https://github.com/patelvivekdev/fast-bm25/issues"
   },
   "dependencies": {
-    "porter2": "^1.0.2"
+    "porter2": "^1.1.0"
+  },
+  "overrides": {
+    "esbuild": "^0.28.1"
   }
 }

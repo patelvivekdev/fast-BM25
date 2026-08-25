@@ -8,7 +8,9 @@ import type {
   SerializableResult,
 } from './types';
 import { DEFAULT_OPTIONS } from './constants';
+import { cpus } from 'os';
 import path from 'path';
+import { fileURLToPath } from 'url';
 
 /**
  * Implementation of the Okapi BM25 ranking algorithm with field boosting support
@@ -23,6 +25,9 @@ export class BM25 {
   private documentFrequency: Uint32Array;
   private readonly termFrequencies: Map<number, Map<number, number>>;
   private readonly fieldBoosts: FieldBoosts;
+  private readonly workerOptions: Omit<BM25Options, 'stemWords'> & {
+    fieldBoosts?: FieldBoosts;
+  };
   private documents: Document[];
 
   /**
@@ -39,6 +44,8 @@ export class BM25 {
     this.lengthNormalizationFactor = opts.b;
     this.tokenizer = new Tokenizer(opts);
     this.fieldBoosts = opts.fieldBoosts || {};
+    const { stemWords: _stemWords, ...workerOptions } = opts;
+    this.workerOptions = workerOptions;
 
     // Initialize empty data structures
     this.documents = [];
@@ -136,7 +143,10 @@ export class BM25 {
   public async addDocumentsParallel(docs: Document[]): Promise<void> {
     if (!docs || docs.length === 0) return;
 
-    const numWorkers = Math.ceil(require('os').cpus().length / 2) || 2;
+    const numWorkers = Math.min(
+      docs.length,
+      Math.max(1, Math.ceil(cpus().length / 2)),
+    );
     const batchSize = Math.ceil(docs.length / numWorkers);
     const workers: Worker[] = [];
 
@@ -144,7 +154,13 @@ export class BM25 {
       const workerPromises = Array.from({ length: numWorkers }, (_, i) => {
         const start = i * batchSize;
         const end = Math.min(start + batchSize, docs.length);
-        const worker = new Worker(path.resolve(__dirname, './worker.js'));
+        const isCommonJs =
+          typeof module !== 'undefined' &&
+          typeof module.exports !== 'undefined';
+        const workerPath = isCommonJs
+          ? path.resolve(__dirname, './worker.cjs')
+          : fileURLToPath(new URL('./worker.js', import.meta.url));
+        const worker = new Worker(workerPath);
         workers.push(worker);
 
         return new Promise<SerializableResult>((resolve, reject) => {
@@ -152,7 +168,7 @@ export class BM25 {
           worker.on('error', reject);
           worker.postMessage({
             docs: docs.slice(start, end),
-            options: { fieldBoosts: this.fieldBoosts },
+            options: this.workerOptions,
           });
         });
       });
@@ -364,7 +380,9 @@ export class BM25 {
         const termIndex = this.termToIndex.get(term)!;
 
         if (this.documentFrequency.length <= termIndex) {
-          const newDocFreq = new Uint32Array(this.documentFrequency.length * 2);
+          const newDocFreq = new Uint32Array(
+            Math.max(termIndex + 1, this.documentFrequency.length * 2, 1),
+          );
           newDocFreq.set(this.documentFrequency);
           this.documentFrequency = newDocFreq;
         }

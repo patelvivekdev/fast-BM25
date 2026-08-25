@@ -15,9 +15,9 @@ A high-performance BM25 (Okapi BM25) implementation in TypeScript with field boo
 ## Installation
 
 ```bash
-npm install fast-bm25
+bun add fast-bm25
 # or
-yarn add fast-bm25
+npm install fast-bm25
 ```
 
 ## Usage
@@ -70,9 +70,7 @@ bm25.addDocuments([
 
 // Add documents in parallel
 
-const largeDocs = [
-  /* ... lots of documents ... */
-];
+const largeDocs = [/* ... lots of documents ... */];
 
 await bm25.addDocumentsParallel(largeDocs);
 ```
