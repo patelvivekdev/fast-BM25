@@ -1,6 +1,6 @@
 {
   "name": "fast-bm25",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "description": "High-performance BM25 implementation in TypeScript",
   "type": "module",
   "author": "Vivek Patel <me@patelvivek.dev>",

@@ -1,5 +1,11 @@
 # Changelog for `fast-BM25`
 
+## 0.0.7
+
+### Patch Changes
+
+- 9f1caf2: Fix `addDocument`/`addDocuments` so multi-field terms are counted once per document, term frequencies accumulate across fields, and `fieldBoosts` scale term frequency. Scores now match `new BM25(docs, options)` and `addDocumentsParallel` (#13).
+
 ## 0.0.6
 
 ### Patch Changes
