@@ -36,4 +36,39 @@ describe('parallel document indexing', () => {
     expect(index.getDocumentCount()).toBe(documents.length);
     expect(index.search('running')).not.toHaveLength(0);
   });
+
+  it('matches constructor and addDocuments for multi-field terms and fieldBoosts', async () => {
+    const docs = [
+      { title: 'Rust guide', content: 'rust ownership and borrowing in rust' },
+      { title: 'Go guide', content: 'goroutines and channels' },
+      { title: 'Python tips', content: 'list comprehensions' },
+    ];
+    const fromCtor = new EsmBM25(docs);
+    const fromAdd = new EsmBM25();
+    await fromAdd.addDocuments(docs);
+    const fromParallel = new EsmBM25();
+    await fromParallel.addDocumentsParallel(docs);
+
+    const expected = fromCtor.search('rust');
+    expect(fromAdd.search('rust')).toEqual(expected);
+    expect(fromParallel.search('rust')).toEqual(expected);
+
+    const boostedDocs = [
+      { title: 'rust guide', content: 'systems programming overview' },
+      { title: 'general notes', content: 'rust tips and rust tricks' },
+      { title: 'python intro', content: 'scripting basics' },
+    ];
+    const opts = { fieldBoosts: { title: 3, content: 1 } };
+    const boostedCtor = new EsmBM25(boostedDocs, opts);
+    const boostedAdd = new EsmBM25(undefined, opts);
+    await boostedAdd.addDocuments(boostedDocs);
+    const boostedParallel = new EsmBM25(undefined, opts);
+    await boostedParallel.addDocumentsParallel(boostedDocs);
+
+    const boostedExpected = boostedCtor.search('rust');
+    expect(boostedAdd.search('rust')).toEqual(boostedExpected);
+    expect(boostedParallel.search('rust')).toEqual(boostedExpected);
+    expect(boostedExpected[0].index).toBe(0);
+    expect(boostedExpected[1].index).toBe(1);
+  });
 });

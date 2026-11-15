@@ -8,6 +8,7 @@ import type {
   SerializableResult,
 } from './types';
 import { DEFAULT_OPTIONS } from './constants';
+import { collectDocumentTermStats, processDocuments } from './document-stats';
 import { cpus } from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -64,7 +65,11 @@ export class BM25 {
         documentFrequency,
         averageDocLength,
         termFrequencies,
-      } = this.processDocuments(docs);
+      } = processDocuments(
+        docs,
+        (content) => this.tokenizer.tokenize(content).tokens,
+        this.fieldBoosts,
+      );
 
       this.documentLengths = documentLengths;
       this.termToIndex = termToIndex;
@@ -72,68 +77,6 @@ export class BM25 {
       this.averageDocLength = averageDocLength;
       this.termFrequencies = termFrequencies;
     }
-  }
-
-  private processDocuments(docs: Document[]): {
-    documentLengths: Uint32Array;
-    termToIndex: Map<string, number>;
-    documentFrequency: Uint32Array;
-    averageDocLength: number;
-    termFrequencies: Map<number, Map<number, number>>;
-  } {
-    const documentLengths = new Uint32Array(docs.length);
-    const termToIndex = new Map<string, number>();
-    const termDocs = new Map<string, Set<number>>();
-    const termFrequencies = new Map<number, Map<number, number>>();
-    let totalLength = 0;
-    let nextTermIndex = 0;
-
-    docs.forEach((doc, docIndex) => {
-      let docLength = 0;
-      Object.entries(doc).forEach(([field, content]) => {
-        const fieldBoost = this.fieldBoosts[field] || 1;
-        const { tokens } = this.tokenizer.tokenize(content);
-        docLength += tokens.length * fieldBoost;
-
-        const uniqueTerms = new Set(tokens);
-        uniqueTerms.forEach((term) => {
-          if (!termToIndex.has(term)) {
-            termToIndex.set(term, nextTermIndex++);
-          }
-          const termIndex = termToIndex.get(term)!;
-
-          if (!termDocs.has(term)) {
-            termDocs.set(term, new Set());
-          }
-          termDocs.get(term)!.add(docIndex);
-
-          if (!termFrequencies.has(termIndex)) {
-            termFrequencies.set(termIndex, new Map());
-          }
-          const freq = tokens.filter((t) => t === term).length * fieldBoost; // Apply boost to term frequency
-          const existingFreq =
-            termFrequencies.get(termIndex)!.get(docIndex) || 0;
-          termFrequencies.get(termIndex)!.set(docIndex, existingFreq + freq);
-        });
-      });
-
-      documentLengths[docIndex] = docLength;
-      totalLength += docLength;
-    });
-
-    const documentFrequency = new Uint32Array(termToIndex.size);
-    termDocs.forEach((docs, term) => {
-      const termIndex = termToIndex.get(term)!;
-      documentFrequency[termIndex] = docs.size;
-    });
-
-    return {
-      documentLengths,
-      termToIndex,
-      documentFrequency,
-      averageDocLength: totalLength / docs.length,
-      termFrequencies,
-    };
   }
 
   /**
@@ -366,34 +309,32 @@ export class BM25 {
     const docIndex = this.documentLengths.length;
     this.documents.push(doc);
 
-    let docLength = 0;
+    const { docLength, termFrequencies: docTermFreqs } =
+      collectDocumentTermStats(
+        doc,
+        (content) => this.tokenizer.tokenize(content).tokens,
+        this.fieldBoosts,
+      );
 
-    Object.entries(doc).forEach(([field, content]) => {
-      const { tokens } = this.tokenizer.tokenize(content);
-      docLength += tokens.length * (this.fieldBoosts[field] || 1);
+    docTermFreqs.forEach((freq, term) => {
+      if (!this.termToIndex.has(term)) {
+        this.termToIndex.set(term, this.termToIndex.size);
+      }
+      const termIndex = this.termToIndex.get(term)!;
 
-      const uniqueTerms = new Set(tokens);
-      uniqueTerms.forEach((term) => {
-        if (!this.termToIndex.has(term)) {
-          this.termToIndex.set(term, this.termToIndex.size);
-        }
-        const termIndex = this.termToIndex.get(term)!;
+      if (this.documentFrequency.length <= termIndex) {
+        const newDocFreq = new Uint32Array(
+          Math.max(termIndex + 1, this.documentFrequency.length * 2, 1),
+        );
+        newDocFreq.set(this.documentFrequency);
+        this.documentFrequency = newDocFreq;
+      }
+      this.documentFrequency[termIndex]++;
 
-        if (this.documentFrequency.length <= termIndex) {
-          const newDocFreq = new Uint32Array(
-            Math.max(termIndex + 1, this.documentFrequency.length * 2, 1),
-          );
-          newDocFreq.set(this.documentFrequency);
-          this.documentFrequency = newDocFreq;
-        }
-        this.documentFrequency[termIndex]++;
-
-        if (!this.termFrequencies.has(termIndex)) {
-          this.termFrequencies.set(termIndex, new Map());
-        }
-        const freq = tokens.filter((t) => t === term).length;
-        this.termFrequencies.get(termIndex)!.set(docIndex, freq);
-      });
+      if (!this.termFrequencies.has(termIndex)) {
+        this.termFrequencies.set(termIndex, new Map());
+      }
+      this.termFrequencies.get(termIndex)!.set(docIndex, freq);
     });
 
     const newDocLengths = new Uint32Array(this.documentLengths.length + 1);
